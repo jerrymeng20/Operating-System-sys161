@@ -45,6 +45,12 @@
 #include <syscall.h>
 #include <test.h>
 
+#include "opt-A2.h" /* required for A2 */
+
+#if OPT_A2
+#include <copyinout.h>
+#endif /* OPT_A2 */
+
 /*
  * Load program "progname" and start running it in usermode.
  * Does not return except on error.
@@ -97,9 +103,50 @@ runprogram(char *progname)
 		return result;
 	}
 
+#if OPT_A2
+	/* CRITICAL: copy progname to user stack */
+	/* Determine the space needed for argv and argv offset stack */
+	int argv_space = ROUNDUP((strlen(progname) + 1) * sizeof(char), 4);
+	int offset_space = ROUNDUP(2 * sizeof(char *), sizeof(vaddr_t)); /* argv includes progname and NULL */
+
+	/* move the stack pointer to beginning of argv offset, and set a pointer to that address (top of stack) */
+	stackptr -= (argv_space + offset_space);
+
+	userptr_t startptr = (userptr_t) stackptr;
+
+	/* determine the stack address of current argument */
+	userptr_t currArgAddr = startptr + offset_space;
+
+	char **argvOffset = kmalloc(2 * sizeof(char *));
+	size_t actual;
+
+	/* copy progname to the user stack */
+	result = copyoutstr(progname, currArgAddr, strlen(progname) + 1, &actual);
+    if (result) {
+      return result;
+    }
+
+	argvOffset[0] = (char *) currArgAddr;
+
+	/* copy all argument offsets to the stack */
+	result = copyout(argvOffset, startptr, 2 * sizeof(char *));
+	if (result) {
+		return result;
+	}
+
+	/* Now free the space allocated in the kernel */
+  	kfree(argvOffset);
+	
+#endif /* OPT_A2 */
+
 	/* Warp to user mode. */
+#if OPT_A2
+	enter_new_process(1 /*argc*/, (userptr_t) stackptr /*userspace addr of argv*/,
+			  stackptr, entrypoint);
+#else
 	enter_new_process(0 /*argc*/, NULL /*userspace addr of argv*/,
 			  stackptr, entrypoint);
+#endif /* OPT_A2 */
 	
 	/* enter_new_process does not return. */
 	panic("enter_new_process returned\n");

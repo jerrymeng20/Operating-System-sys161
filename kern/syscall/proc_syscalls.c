@@ -408,6 +408,8 @@ sys_execv(const userptr_t progname, const userptr_t args)
   }
 
   /* Now free the space allocated in the kernel */
+  kfree(argvOffset);
+  
   for (int i = 0; i < argc; i++) {
     kfree(argv[i]);
   }
