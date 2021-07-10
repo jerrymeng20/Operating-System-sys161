@@ -51,6 +51,124 @@
 #include <copyinout.h>
 #endif /* OPT_A2 */
 
+#if OPT_A2
+/*
+ * Load program "progname" and start running it in usermode.
+ * Does not return except on error.
+ *
+ * Calls vfs_open on progname and thus may destroy it.
+ */
+int
+runprogram(char *progname, char **args, int argc)
+{
+	struct addrspace *as;
+	struct vnode *v;
+	vaddr_t entrypoint, stackptr;
+	int result;
+
+	(void) args;
+
+	/* Open the file. */
+	result = vfs_open(progname, O_RDONLY, 0, &v);
+	if (result) {
+		return result;
+	}
+
+	/* We should be a new process. */
+	KASSERT(curproc_getas() == NULL);
+
+	/* Create a new address space. */
+	as = as_create();
+	if (as ==NULL) {
+		vfs_close(v);
+		return ENOMEM;
+	}
+
+	/* Switch to it and activate it. */
+	curproc_setas(as);
+	as_activate();
+
+	/* Load the executable. */
+	result = load_elf(v, &entrypoint);
+	if (result) {
+		/* p_addrspace will go away when curproc is destroyed */
+		vfs_close(v);
+		return result;
+	}
+
+	/* Done with the file now. */
+	vfs_close(v);
+
+	/* Define the user stack in the address space */
+	result = as_define_stack(as, &stackptr);
+	if (result) {
+		/* p_addrspace will go away when curproc is destroyed */
+		return result;
+	}
+
+	/* CRITICAL: copy arguments to user stack */
+	/* --STEP 1--: determine total length of arguments */
+	int argv_total_len = 0;
+	for (int i = 0; i < argc; i++) {
+		argv_total_len += (strlen(args[i]) + 1);
+	}
+
+	/* Determine the space needed for argv and argv offset stack */
+	int argv_space = ROUNDUP(argv_total_len * sizeof(char), 4);
+  	int offset_space = ROUNDUP((argc + 1) * sizeof(char *), sizeof(vaddr_t));
+
+	/* move the stack pointer to beginning of argv offset, and set a pointer to that address (top of stack) */
+	stackptr -= (argv_space + offset_space);
+
+	userptr_t startptr = (userptr_t) stackptr;
+
+	/* determine the stack address of current argument */
+	userptr_t currArgAddr = startptr + offset_space;
+
+	/* argvOffset[i] stores the offset to argv[i] */
+  	char **argvOffset = kmalloc((argc + 1) * sizeof(char *));
+
+	size_t actual;
+
+	/* --STEP 2--: copy all arguments (argv[0] to argv[argc - 1]) to the stack */
+	for (int i = 0; i < argc; i++) {
+		char *currArgv = args[i];
+		// kprintf("Current: %s\n", currArgv);
+
+		// copy currArgv to currArgAddr at user stack
+		result = copyoutstr(currArgv, currArgAddr, strlen(currArgv) + 1, &actual);
+		// kprintf("Actual: %d\n", (int) actual);
+		if (result) {
+			return result;
+		}
+
+		argvOffset[i] = (char *) currArgAddr;
+
+		// progress stack address tracker
+		currArgAddr += actual * sizeof(char);
+	}
+	argvOffset[argc] = NULL;
+
+	/* --STEP 3--: copy all argument offsets to the stack */
+	result = copyout(argvOffset, startptr, (argc + 1) * sizeof(char *));
+	if (result) {
+		return result;
+	}
+
+	/* Now free the space allocated in the kernel */
+	kfree(argvOffset);
+
+	/* Warp to user mode. */
+	enter_new_process(argc /*argc*/, (userptr_t) stackptr /*userspace addr of argv*/,
+			  stackptr, entrypoint);
+	
+	/* enter_new_process does not return. */
+	panic("enter_new_process returned\n");
+	return EINVAL;
+}
+
+#else
+
 /*
  * Load program "progname" and start running it in usermode.
  * Does not return except on error.
@@ -103,53 +221,14 @@ runprogram(char *progname)
 		return result;
 	}
 
-#if OPT_A2
-	/* CRITICAL: copy progname to user stack */
-	/* Determine the space needed for argv and argv offset stack */
-	int argv_space = ROUNDUP((strlen(progname) + 1) * sizeof(char), 4);
-	int offset_space = ROUNDUP(2 * sizeof(char *), sizeof(vaddr_t)); /* argv includes progname and NULL */
-
-	/* move the stack pointer to beginning of argv offset, and set a pointer to that address (top of stack) */
-	stackptr -= (argv_space + offset_space);
-
-	userptr_t startptr = (userptr_t) stackptr;
-
-	/* determine the stack address of current argument */
-	userptr_t currArgAddr = startptr + offset_space;
-
-	char **argvOffset = kmalloc(2 * sizeof(char *));
-	size_t actual;
-
-	/* copy progname to the user stack */
-	result = copyoutstr(progname, currArgAddr, strlen(progname) + 1, &actual);
-    if (result) {
-      return result;
-    }
-
-	argvOffset[0] = (char *) currArgAddr;
-
-	/* copy all argument offsets to the stack */
-	result = copyout(argvOffset, startptr, 2 * sizeof(char *));
-	if (result) {
-		return result;
-	}
-
-	/* Now free the space allocated in the kernel */
-  	kfree(argvOffset);
-	
-#endif /* OPT_A2 */
-
 	/* Warp to user mode. */
-#if OPT_A2
-	enter_new_process(1 /*argc*/, (userptr_t) stackptr /*userspace addr of argv*/,
-			  stackptr, entrypoint);
-#else
 	enter_new_process(0 /*argc*/, NULL /*userspace addr of argv*/,
 			  stackptr, entrypoint);
-#endif /* OPT_A2 */
 	
 	/* enter_new_process does not return. */
 	panic("enter_new_process returned\n");
 	return EINVAL;
 }
+
+#endif
 
