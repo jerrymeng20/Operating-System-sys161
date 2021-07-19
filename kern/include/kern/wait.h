@@ -30,6 +30,8 @@
 #ifndef _KERN_WAIT_H_
 #define _KERN_WAIT_H_
 
+#include "opt-A3.h" /* required for A3 */
+
 /*
  * Definitions for wait().
  */
@@ -60,6 +62,11 @@
 #define __WSIGNALED  1		/* Process received a fatal signal. */
 #define __WCORED     2		/* Process dumped core on a fatal signal. */
 #define __WSTOPPED   3		/* Process stopped (and didn't exit). */
+
+#if OPT_A3
+/* Extra exitcode for special situation */
+#define __WROMWRITE  4      /* Process terminated because of writing to read-only memory */
+#endif /* OPT_A3 */
 
 /* Test macros, used by applications. */
 #define WIFEXITED(x)   (_WWHAT(x)==__WEXITED)

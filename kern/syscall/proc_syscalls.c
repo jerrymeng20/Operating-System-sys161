@@ -11,6 +11,7 @@
 #include <copyinout.h>
 
 #include "opt-A2.h" /* required for A2 */
+#include "opt-A3.h" /* required for A3 */
 
 #if OPT_A2
 #include <array.h>
@@ -30,6 +31,22 @@ void sys__exit(int exitcode) {
   struct proc *p = curproc;
 
 #if OPT_A2
+  /* encode exitcode */
+#if OPT_A3
+  switch(exitcode) {
+    case __WROMWRITE:
+      /* terminated because of read-only memory write */
+      exitcode = __WSIGNALED;
+      exitcode = _MKWAIT_SIG(exitcode);
+      break;
+    default:
+      exitcode = _MKWAIT_EXIT(exitcode);
+      break;
+  }
+#else
+  exitcode = _MKWAIT_EXIT(exitcode);
+#endif /* OPT_A3 */
+
   /* update process with exit information */
   spinlock_acquire(&p->p_lock);
   p->exitcode = exitcode;
@@ -158,8 +175,6 @@ sys_waitpid(pid_t pid,
 
   /* proc_c's exitcode should be updated */
   exitstatus = proc_c->exitcode;
-
-  exitstatus = _MKWAIT_EXIT(exitstatus);
  
   if (options != 0) {
     return(EINVAL);

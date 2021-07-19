@@ -37,6 +37,8 @@
 
 #include <vm.h>
 
+#include "opt-A3.h" /* required for A3 */
+
 struct vnode;
 
 
@@ -55,6 +57,10 @@ struct addrspace {
   paddr_t as_pbase2;
   size_t as_npages2;
   paddr_t as_stackpbase;
+
+#if OPT_A3
+	bool hasLoaded; /* flag indicate if current address space has been loaded into memory (load_elf completed) */
+#endif /* OPT_A3 */
 };
 
 /*

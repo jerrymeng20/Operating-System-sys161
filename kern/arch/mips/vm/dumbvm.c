@@ -38,6 +38,13 @@
 #include <addrspace.h>
 #include <vm.h>
 
+#include "opt-A3.h" /* required for A3 */
+
+#if OPT_A3
+#include <kern/wait.h>
+#include <syscall.h>
+#endif /* OPT_A3 */
+
 /*
  * Dumb MIPS-only "VM system" that is intended to only be just barely
  * enough to struggle off the ground.
@@ -114,14 +121,25 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 	struct addrspace *as;
 	int spl;
 
+#if OPT_A3
+	bool isCode = false;
+#endif /* OPT_A3 */
+
 	faultaddress &= PAGE_FRAME;
 
 	DEBUG(DB_VM, "dumbvm: fault: 0x%x\n", faultaddress);
 
 	switch (faulttype) {
 	    case VM_FAULT_READONLY:
+
+		#if OPT_A3
+		/* terminate current process */
+		sys__exit(__WROMWRITE);
+		#else
 		/* We always create pages read-write, so we can't get this */
 		panic("dumbvm: got VM_FAULT_READONLY\n");
+		#endif /* OPT_A3 */
+
 	    case VM_FAULT_READ:
 	    case VM_FAULT_WRITE:
 		break;
@@ -169,6 +187,11 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 	stacktop = USERSTACK;
 
 	if (faultaddress >= vbase1 && faultaddress < vtop1) {
+		#if OPT_A3
+		// the faultaddress is in code segment, mark as isCode
+		isCode = true;
+		#endif /* OPT_A3 */
+		
 		paddr = (faultaddress - vbase1) + as->as_pbase1;
 	}
 	else if (faultaddress >= vbase2 && faultaddress < vtop2) {
@@ -194,15 +217,36 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 		}
 		ehi = faultaddress;
 		elo = paddr | TLBLO_DIRTY | TLBLO_VALID;
+
+		#if OPT_A3
+		// if this address space is in code segment and has completed loading, load the TLB entry with TLBLO_DIRTY off
+		if (isCode && as->hasLoaded) {
+			elo &= ~TLBLO_DIRTY;
+		}
+		#endif /* OPT_A3 */
+
 		DEBUG(DB_VM, "dumbvm: 0x%x -> 0x%x\n", faultaddress, paddr);
 		tlb_write(ehi, elo, i);
 		splx(spl);
 		return 0;
 	}
 
+#if OPT_A3
+	// TLB is full, call tlb_random() to write to a random TLB entry
+	ehi = faultaddress;
+	elo = paddr | TLBLO_DIRTY | TLBLO_VALID;
+	// if this address space is in code segment and has completed loading, load the TLB entry with TLBLO_DIRTY off
+	if (isCode && as->hasLoaded) {
+		elo &= ~TLBLO_DIRTY;
+	}
+	tlb_random(ehi, elo);
+	splx(spl);
+	return 0;
+#else 
 	kprintf("dumbvm: Ran out of TLB entries - cannot handle page fault\n");
 	splx(spl);
 	return EFAULT;
+#endif /* OPT_A3 */
 }
 
 struct addrspace *
@@ -220,6 +264,10 @@ as_create(void)
 	as->as_pbase2 = 0;
 	as->as_npages2 = 0;
 	as->as_stackpbase = 0;
+
+	#if OPT_A3
+	as->hasLoaded = false;
+	#endif /* OPT_A3 */
 
 	return as;
 }
