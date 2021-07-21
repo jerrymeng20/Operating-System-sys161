@@ -637,7 +637,7 @@ dumbvm.o: ../../arch/mips/vm/dumbvm.c ../../include/types.h \
   includelinks/machine/current.h includelinks/mips/tlb.h \
   ../../include/addrspace.h ../../include/vm.h includelinks/machine/vm.h \
   opt-A3.h opt-A3.h ../../include/kern/wait.h opt-A3.h \
-  ../../include/syscall.h
+  ../../include/syscall.h ../../include/copyinout.h
 ram.o: ../../arch/mips/vm/ram.c ../../include/types.h \
   ../../include/kern/types.h includelinks/kern/machine/types.h \
   includelinks/machine/types.h ../../include/lib.h ../../include/cdefs.h \

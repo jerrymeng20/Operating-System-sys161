@@ -43,6 +43,7 @@
 #if OPT_A3
 #include <kern/wait.h>
 #include <syscall.h>
+#include <copyinout.h>
 #endif /* OPT_A3 */
 
 /*
@@ -53,21 +54,133 @@
 /* under dumbvm, always have 48k of user stack */
 #define DUMBVM_STACKPAGES    12
 
+#if OPT_A3
+unsigned long numpages;           				/* total number of pages in core-map */
+paddr_t page_start;								/* start address of pages */
+paddr_t coremap;           						/* core-map that stores the page segments */
+bool core_created = false;                      /* indicate if core-map has been created */
+static struct spinlock core_lock = SPINLOCK_INITIALIZER;        /* core-map lock */
+#endif /* OPT_A3 */
+
 /*
  * Wrap rma_stealmem in a spinlock.
  */
 static struct spinlock stealmem_lock = SPINLOCK_INITIALIZER;
 
+
+#if OPT_A3
+void
+print_coremap(void)
+{
+	for (unsigned int i = 0; i < numpages; i++) {
+		kprintf("%lu ", *(unsigned long *) (PADDR_TO_KVADDR(coremap + i * sizeof(unsigned long))));
+	}
+	kprintf("\n");
+}
+#endif /* OPT_A3 */
+
+
 void
 vm_bootstrap(void)
 {
+#if OPT_A3
+	/* calculate the number of pages fit in the memory */
+	paddr_t lo, hi;
+	ram_getsize(&lo, &hi);
+	numpages = (hi - lo) / (PAGE_SIZE + sizeof(unsigned long));
+
+	spinlock_acquire(&core_lock);
+	/* now create the core-map */
+	coremap = lo;
+
+	/* calculate the start frame that core-map manages */
+	page_start = ROUNDUP(coremap + numpages * sizeof(unsigned long), PAGE_SIZE);
+	
+	/* for now, create an empty core-map with all pages unused */
+	for (unsigned long i = 0; i < numpages; i++) {
+		*(unsigned long *) (PADDR_TO_KVADDR(coremap + i * sizeof(unsigned long))) = 0;
+	}
+
+	/* print the coremap */
+	/*kprintf("*****************DEBUG******************\n");
+	kprintf("core-map start address: %x.\n", (unsigned int) coremap);
+	kprintf("paging start address: %x.\n", (unsigned int) page_start);
+	kprintf("core-map page number: %u.\n", (unsigned int) numpages);
+	kprintf("****************************************\n");*/
+
+	core_created = true;
+	spinlock_release(&core_lock);
+#else
 	/* Do nothing. */
+#endif /* OPT_A3 */
 }
 
 static
 paddr_t
 getppages(unsigned long npages)
 {
+#if OPT_A3
+
+	paddr_t addr = 0;
+
+	if (core_created) {
+		/* core-map has been created, use core-map instead of stealing memory */
+		spinlock_acquire(&core_lock);
+
+		unsigned long contigiuous_counter = 0;
+		unsigned long start_index = 0;
+
+		/* loop through the coremap, try to allocate a contigiuous block of n pages */
+		for (unsigned long i = 0; i < numpages; i++) {
+			if (*(unsigned long *) (PADDR_TO_KVADDR(coremap + i * sizeof(unsigned long))) == 0) {
+				if (contigiuous_counter == 0) {
+					/* set addr to the beginning of this chunk of memory */
+					addr = page_start + i * PAGE_SIZE;
+					start_index = i;
+				}
+				contigiuous_counter++;
+			} else {
+				/* this chunk of memory has been used, reset the counter */
+				contigiuous_counter = 0;
+			}
+
+			/* if we find a memory chunk that is npages pages long, modify the core-map and return the address */
+			if (contigiuous_counter == npages) {
+				/* modify core-map */
+				for (unsigned long j = start_index; j <= i; j++) {
+					*(unsigned long *) (PADDR_TO_KVADDR(coremap + j * sizeof(unsigned long))) = j + 1 - start_index;
+				}
+
+				// *************************DEBUG*************************
+				// kprintf("Successfully allocated %lu pages, started at index %lu.\n", npages, start_index);
+				// print_coremap();
+
+				spinlock_release(&core_lock);
+				return addr;
+			}
+		}
+
+		spinlock_release(&core_lock);
+		/* we should not reach there if we find valid memory in core-map
+		* if we reach there, we do not have enough memory in the core-map
+		* return appropriate error code */
+
+		// *************************DEBUG*************************
+		// print_coremap();
+
+		panic("Not enough memory!\n");
+		return 0;
+	}
+	else {
+		/* core-map has not been created, for now just steal memory */
+		spinlock_acquire(&stealmem_lock);
+		addr = ram_stealmem(npages);
+		spinlock_release(&stealmem_lock);
+		return addr;
+	}
+
+#else
+
 	paddr_t addr;
 
 	spinlock_acquire(&stealmem_lock);
@@ -76,6 +189,8 @@ getppages(unsigned long npages)
 	
 	spinlock_release(&stealmem_lock);
 	return addr;
+
+#endif
 }
 
 /* Allocate/free some kernel-space virtual pages */
@@ -93,9 +208,53 @@ alloc_kpages(int npages)
 void 
 free_kpages(vaddr_t addr)
 {
-	/* nothing - leak the memory. */
+#if OPT_A3
 
+	spinlock_acquire(&core_lock);
+	
+	/* calculate the corresponding corresponding page table entry */
+	paddr_t pa = KVADDR_TO_PADDR(addr);
+	unsigned long index = (unsigned long) ROUNDUP((pa - page_start) / PAGE_SIZE, 1);
+
+	/* start from this index, find all contiguous entries and reset the page table entry */
+	unsigned long *tracker = (unsigned long *) (PADDR_TO_KVADDR(coremap + index * sizeof(unsigned long)));
+	unsigned long tracker_val = *tracker;
+	index += 1;
+
+	// *************************DEBUG*************************
+	// kprintf("freed physical address: %x.\n", pa);
+	// kprintf("freed virtual address: %x.\n", addr);
+	// kprintf("freed address at index %lu, where core-map value is %lu.\n", index - 1, tracker_val);
+
+	while (index < numpages) {
+		unsigned long *new_tracker = (unsigned long *) (PADDR_TO_KVADDR(coremap + index * sizeof(unsigned long)));
+
+		if (*new_tracker != tracker_val + 1) {
+			/* end of current contiguous page, break */
+			*tracker = 0;
+			break;
+		}
+		else {
+			/* current page continuous */
+			*tracker = 0;
+			tracker = new_tracker;
+			tracker_val = *tracker;
+
+			index++;
+		}
+	}
+
+	// *************************DEBUG*************************
+	// print_coremap();
+
+	spinlock_release(&core_lock);
+	
+#else
+
+	/* nothing - leak the memory. */
 	(void)addr;
+
+#endif /* OPT_A3 */
 }
 
 void
@@ -275,6 +434,19 @@ as_create(void)
 void
 as_destroy(struct addrspace *as)
 {
+	#if OPT_A3
+
+	/* free all memory allocated in code segment */
+	kfree((void *) PADDR_TO_KVADDR(as->as_pbase1));
+
+	/* free all memory allocated in data segment */
+	kfree((void *) PADDR_TO_KVADDR(as->as_pbase2));
+
+	/* free all memory allocated in stack segment */
+	kfree((void *) PADDR_TO_KVADDR(as->as_stackpbase));
+
+	#endif /* OPT_A3 */
+
 	kfree(as);
 }
 

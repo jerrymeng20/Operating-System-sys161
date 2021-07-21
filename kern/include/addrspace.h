@@ -63,6 +63,10 @@ struct addrspace {
 #endif /* OPT_A3 */
 };
 
+#if OPT_A3
+	void print_coremap(void);
+#endif /* OPT_A3 */
+
 /*
  * Functions in addrspace.c:
  *
